@@ -14,6 +14,12 @@ create table auth.users (
   created_at         timestamptz not null default now()
 );
 
+create table auth.sessions (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users(id),
+  created_at timestamptz not null default now()
+);
+
 create function auth.uid() returns uuid language sql stable as $$
   select coalesce(
     nullif(current_setting('request.jwt.claim.sub', true), ''),

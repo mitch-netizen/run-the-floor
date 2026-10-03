@@ -180,7 +180,7 @@ Excluded and why:
 ```
 src/
   app/(auth)/sign-in, auth/callback
-  app/[venue]/            today | checklists | handover | tasks | functions | runsheet | processes | incidents | maintenance | contacts | emergency | admin/*
+  app/v/[venue]/          today | checklists | handover | tasks | functions | runsheet | processes | incidents | maintenance | contacts | emergency | admin/*
   app/api/import/[kind]   parse + preview (server), commit via server action
   lib/supabase/{server,client,middleware}.ts
   lib/capabilities.ts     the capability catalogue
@@ -193,7 +193,7 @@ tests/db/*.test.ts, tests/unit/*, tests/e2e/*
 ```
 
 **Venue routing:**
-- Routes use a path segment, `/{venue-slug}/…`.
+- Routes use a path segment, `/v/{venue-slug}/…` (the `/v/` prefix stops a venue slug ever colliding with app routes like `/sign-in`).
 - A venue picker appears for users with more than one venue.
 - Subdomains can be added later with middleware rewrites, and no data change is needed.
 
