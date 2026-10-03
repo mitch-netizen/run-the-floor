@@ -39,12 +39,15 @@ create table public.process_versions (
   updated_at      timestamptz not null default now(),
   unique (process_id, version),
   unique (id, venue_id),
+  unique (process_id, id),
   foreign key (process_id, venue_id) references public.processes(id, venue_id)
 );
 create index on public.process_versions using gin (search);
 
+-- The current version must be one of this process's own versions (which also
+-- pins it to the same venue).
 alter table public.processes
-  add foreign key (current_version_id, venue_id) references public.process_versions(id, venue_id);
+  add foreign key (id, current_version_id) references public.process_versions(process_id, id);
 
 create table public.process_acknowledgements (
   id                 uuid primary key default gen_random_uuid(),

@@ -112,6 +112,36 @@ create trigger tasks_owner_field_guard
   before update on public.tasks
   for each row execute function app.tasks_owner_field_guard();
 
+-- Each manager signs only their own side of the handover.
+create or replace function app.guard_handover_signatures() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+  if new.outgoing_signed_at is distinct from (case when tg_op = 'UPDATE' then old.outgoing_signed_at end)
+     and new.outgoing_user_id is distinct from auth.uid() then
+    raise exception 'only the outgoing manager can sign as outgoing' using errcode = '42501';
+  end if;
+  if new.incoming_signed_at is distinct from (case when tg_op = 'UPDATE' then old.incoming_signed_at end)
+     and new.incoming_user_id is distinct from auth.uid() then
+    raise exception 'only the incoming manager can sign as incoming' using errcode = '42501';
+  end if;
+  if tg_op = 'UPDATE' and old.outgoing_signed_at is not null
+     and new.outgoing_user_id is distinct from old.outgoing_user_id then
+    raise exception 'signed handover parties cannot change' using errcode = '42501';
+  end if;
+  if tg_op = 'UPDATE' and old.incoming_signed_at is not null
+     and new.incoming_user_id is distinct from old.incoming_user_id then
+    raise exception 'signed handover parties cannot change' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+
+create trigger guard_handover_signatures
+  before insert or update on public.handovers
+  for each row execute function app.guard_handover_signatures();
+
 -- Handover is locked once both managers have signed.
 create trigger signed_handover_locked
   before update on public.handovers

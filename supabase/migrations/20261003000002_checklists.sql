@@ -115,7 +115,8 @@ create table public.checklist_runs (
   unique (id, venue_id),
   foreign key (template_version_id, venue_id) references public.checklist_template_versions(id, venue_id),
   foreign key (shift_id, venue_id)            references public.shifts(id, venue_id),
-  foreign key (area_id, venue_id)             references public.venue_areas(id, venue_id)
+  foreign key (area_id, venue_id)             references public.venue_areas(id, venue_id),
+  check (status <> 'completed' or (completed_by is not null and completed_at is not null))
 );
 create index on public.checklist_runs (venue_id, trading_date);
 
@@ -177,6 +178,61 @@ create trigger completed_run_locked
   for each row when (old.status <> 'open')
   execute function app.reject_locked();
 
+-- A run is born open, and only leaves 'open' through close-out:
+--   * completed: needs checklist.close_out, every required item answered and
+--     no open exceptions on the run
+--   * missed: needs checklist.close_out (or the system sweep, which has no user)
+create or replace function app.guard_run_status() returns trigger
+language plpgsql security definer set search_path = '' as $$
+declare
+  missing text[];
+begin
+  if tg_op = 'INSERT' then
+    if new.status <> 'open' then
+      raise exception 'checklist runs must start open' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  if new.status = old.status then
+    return new;
+  end if;
+
+  if auth.uid() is not null and not app.can(new.venue_id, 'checklist.close_out') then
+    raise exception 'closing out a checklist needs checklist.close_out' using errcode = '42501';
+  end if;
+
+  if auth.uid() is not null and new.status = 'completed' and new.completed_by is distinct from auth.uid() then
+    raise exception 'completed_by must be the person closing out' using errcode = '42501';
+  end if;
+
+  if new.status = 'completed' then
+    select array_agg(item ->> 'key') into missing
+    from public.checklist_template_versions v,
+         jsonb_array_elements(v.items) item
+    where v.id = new.template_version_id
+      and coalesce((item ->> 'required')::boolean, false)
+      and not exists (
+        select 1 from public.run_items ri
+        where ri.run_id = new.id and ri.item_key = item ->> 'key'
+          and (ri.value is not null and ri.value <> 'null'::jsonb or ri.photo_path is not null)
+      );
+    if missing is not null then
+      raise exception 'required items not answered: %', missing using errcode = '23514';
+    end if;
+
+    if exists (select 1 from public.exceptions e
+               where e.source_type = 'checklist_run' and e.source_id = new.id and e.status = 'open') then
+      raise exception 'resolve every exception before closing out' using errcode = '23514';
+    end if;
+  end if;
+  return new;
+end $$;
+
+create trigger guard_run_status
+  before insert or update of status on public.checklist_runs
+  for each row execute function app.guard_run_status();
+
 create or replace function app.reject_items_on_locked_run() returns trigger
 language plpgsql security definer set search_path = '' as $$
 begin
@@ -189,6 +245,20 @@ end $$;
 create trigger run_items_locked_run
   before insert or update on public.run_items
   for each row execute function app.reject_items_on_locked_run();
+
+-- Whoever resolves an exception is recorded as the resolver.
+create or replace function app.guard_exception_resolver() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if auth.uid() is not null and new.status = 'resolved' and new.resolved_by is distinct from auth.uid() then
+    raise exception 'resolved_by must be the person resolving' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+
+create trigger guard_exception_resolver
+  before insert or update of status, resolved_by on public.exceptions
+  for each row execute function app.guard_exception_resolver();
 
 -- Resolved exceptions are final.
 create trigger resolved_exception_locked

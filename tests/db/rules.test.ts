@@ -54,6 +54,7 @@ describe("history is immutable", () => {
     await tx(async (db) => {
       const run = await one<{ id: string }>(db, "select id from public.checklist_runs where venue_id = $1", [VENUE.A1]);
       await actAs(db, USER.adminA1);
+      await db.query("update public.exceptions set status = 'resolved', resolution_note = 'Checked', resolved_by = $1, resolved_at = now() where source_id = $2", [USER.adminA1, run.id]);
       await db.query("update public.checklist_runs set status = 'completed', completed_at = now(), completed_by = $1 where id = $2", [USER.adminA1, run.id]);
       await expectSqlError(db, "update public.checklist_runs set late = true where id = $1", [run.id]);
       await expectSqlError(db, "update public.run_items set value = '9' where run_id = $1", [run.id]);
@@ -61,11 +62,73 @@ describe("history is immutable", () => {
     });
   });
 
+  it("close-out needs checklist.close_out, every required item and no open exceptions", async () => {
+    await tx(async (db) => {
+      const run = await one<{ id: string; template_version_id: string }>(db,
+        "select id, template_version_id from public.checklist_runs where venue_id = $1", [VENUE.A1]);
+      const complete = "update public.checklist_runs set status = 'completed', completed_at = now(), completed_by = $1 where id = $2";
+
+      // checklist.run alone can't close out (or mark missed).
+      await actAs(db, USER.staffA1);
+      await expectSqlError(db, complete, [USER.staffA1, run.id]);
+      await expectSqlError(db, "update public.checklist_runs set status = 'missed' where id = $1", [run.id]);
+
+      // Open exception blocks close-out, and a resolution is attributed to the resolver.
+      await actAs(db, USER.adminA1);
+      await expectSqlError(db, complete, [USER.adminA1, run.id], "23514");
+      await expectSqlError(db, "update public.exceptions set status = 'resolved', resolution_note = 'x', resolved_by = $1, resolved_at = now() where source_id = $2", [USER.staffA1, run.id]);
+      await db.query("update public.exceptions set status = 'resolved', resolution_note = 'Checked', resolved_by = $1, resolved_at = now() where source_id = $2", [USER.adminA1, run.id]);
+
+      // Completion metadata is required, and must name the person closing out.
+      await expectSqlError(db, "update public.checklist_runs set status = 'completed' where id = $1", [run.id]);
+      await expectSqlError(db, complete, [USER.staffA1, run.id]);
+
+      // A required item without an answer blocks close-out.
+      await actAsOwner(db);
+      const fresh = await one<{ id: string }>(db,
+        "insert into public.checklist_runs (venue_id, template_version_id, trading_date) values ($1, $2, current_date) returning id",
+        [VENUE.A1, run.template_version_id]);
+      await actAs(db, USER.adminA1);
+      await expectSqlError(db, complete, [USER.adminA1, fresh.id], "23514");
+      await db.query("insert into public.run_items (venue_id, run_id, item_key, value) values ($1, $2, 'fridge', '4')", [VENUE.A1, fresh.id]);
+      expect((await db.query(complete, [USER.adminA1, fresh.id])).rowCount).toBe(1);
+      expect((await db.query(complete, [USER.adminA1, run.id])).rowCount).toBe(1);
+
+      // Runs can't be created already closed.
+      await expectSqlError(db,
+        "insert into public.checklist_runs (venue_id, template_version_id, trading_date, status, completed_by, completed_at) values ($1, $2, current_date, 'completed', $3, now())",
+        [VENUE.A1, run.template_version_id, USER.adminA1]);
+    });
+  });
+
+  it("a process's current version must be one of its own versions", async () => {
+    await tx(async (db) => {
+      const [a, b] = (await db.query("select p.id, p.current_version_id from public.processes p where venue_id = $1", [VENUE.A1])).rows
+        .concat(await (async () => {
+          const other = await one<{ id: string }>(db, "insert into public.processes (venue_id, title) values ($1, 'Opening') returning id", [VENUE.A1]);
+          const v = await one<{ id: string }>(db, "insert into public.process_versions (venue_id, process_id, version) values ($1, $2, 1) returning id", [VENUE.A1, other.id]);
+          return [{ id: other.id, current_version_id: v.id }];
+        })());
+      await actAs(db, USER.adminA1);
+      await expectSqlError(db, "update public.processes set current_version_id = $1 where id = $2", [b.current_version_id, a.id], "23503");
+    });
+  });
+
   it("a handover signed by both managers is locked", async () => {
     await tx(async (db) => {
       const h = await one<{ id: string }>(db, "select id from public.handovers where venue_id = $1", [VENUE.A1]);
+      // staff_a1 is the incoming manager here; give them handover.write.
+      await db.query("update public.roles set capabilities = '{checklist.run,handover.write}' where venue_id = $1 and name = 'Staff'", [VENUE.A1]);
+      await db.query("update public.handovers set incoming_user_id = $1 where id = $2", [USER.staffA1, h.id]);
+
+      // Nobody can sign for the other party.
       await actAs(db, USER.adminA1);
-      await db.query("update public.handovers set outgoing_signed_at = now(), incoming_user_id = $1, incoming_signed_at = now() where id = $2", [USER.staffA1, h.id]);
+      await expectSqlError(db, "update public.handovers set incoming_signed_at = now() where id = $1", [h.id]);
+      await db.query("update public.handovers set outgoing_signed_at = now() where id = $1", [h.id]);
+      await expectSqlError(db, "update public.handovers set outgoing_user_id = $1 where id = $2", [USER.staffA1, h.id]);
+
+      await actAs(db, USER.staffA1);
+      await db.query("update public.handovers set incoming_signed_at = now() where id = $1", [h.id]);
       await expectSqlError(db, "update public.handovers set notes = 'edited' where id = $1", [h.id]);
     });
   });
@@ -135,6 +198,29 @@ describe("compliance", () => {
       expect(await count(db, "select 1 from public.incidents where restricted")).toBe(0);
       expect(await count(db, "select 1 from public.incidents where not restricted")).toBe(1);
 
+      // Moving a visible incident to a restricted type restricts it.
+      await actAs(db, USER.adminA1);
+      const open = await one<{ id: string }>(db, "select id from public.incidents where venue_id = $1 and not restricted", [VENUE.A1]);
+      // Staff who can log incidents but not view restricted ones.
+      await actAsOwner(db);
+      await db.query("update public.roles set capabilities = '{checklist.run,incidents.log}' where venue_id = $1 and name = 'Staff'", [VENUE.A1]);
+      await actAs(db, USER.staffA1);
+      // They can't move a visible incident into a restricted type (they'd lose sight of it)...
+      await expectSqlError(db, "update public.incidents set incident_type_id = $1, description = 'Sensitive detail' where id = $2", [type.id, open.id]);
+      // ...but they can still log one, which they then can't read back.
+      await db.query("insert into public.incidents (venue_id, incident_type_id, occurred_at, description) values ($1, $2, now(), 'Breach')", [VENUE.A1, type.id]);
+      expect(await count(db, "select 1 from public.incidents where restricted")).toBe(0);
+
+      // A manager re-typing an incident to a restricted type restricts it.
+      await actAs(db, USER.adminA1);
+      await db.query("update public.incidents set incident_type_id = $1 where id = $2", [type.id, open.id]);
+      await actAs(db, USER.staffA1);
+      expect(await count(db, "select 1 from public.incidents where id = $1", [open.id])).toBe(0);
+      // ...and a client can't clear the flag directly.
+      await actAs(db, USER.adminA1);
+      await db.query("update public.incidents set restricted = false where id = $1", [open.id]);
+      expect(await count(db, "select 1 from public.incidents where id = $1 and restricted", [open.id])).toBe(1);
+
       // Unflagging the type later does not expose the record.
       await actAsOwner(db);
       await db.query("update public.incident_types set restricted = false where id = $1", [type.id]);
@@ -154,6 +240,7 @@ describe("compliance", () => {
       expect(self.rowCount).toBe(0);
 
       await actAs(db, USER.adminA1);
+      await expectSqlError(db, "update public.approvals set decision = 'approved', decided_by = $1, decided_at = now() where id = $2", [USER.staffA1, req.id]);
       const ok = await db.query("update public.approvals set decision = 'approved', decided_by = $1, decided_at = now() where id = $2", [USER.adminA1, req.id]);
       expect(ok.rowCount).toBe(1);
       await expectSqlError(db, "update public.approvals set decision = 'rejected' where id = $1", [req.id]);

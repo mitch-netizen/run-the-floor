@@ -106,18 +106,25 @@ create policy restricted_incidents on public.incidents as restrictive
   using (not restricted or app.can(venue_id, 'incidents.view_restricted'));
 create policy restricted_incidents_update on public.incidents as restrictive
   for update to authenticated
-  using (not restricted or app.can(venue_id, 'incidents.view_restricted'));
+  using (not restricted or app.can(venue_id, 'incidents.view_restricted'))
+  with check (not restricted or app.can(venue_id, 'incidents.view_restricted'));
 
+-- restricted comes from the type, ignores the client value, and is sticky:
+-- once an incident has been restricted it stays restricted.
 create or replace function app.incident_restricted_from_type() returns trigger
 language plpgsql security definer set search_path = '' as $$
+declare
+  type_restricted boolean;
 begin
-  select t.restricted into new.restricted
+  select t.restricted into type_restricted
   from public.incident_types t where t.id = new.incident_type_id;
+  new.restricted := coalesce(type_restricted, false)
+                    or (tg_op = 'UPDATE' and old.restricted);
   return new;
 end $$;
 
 create trigger incident_restricted_from_type
-  before insert on public.incidents
+  before insert or update on public.incidents
   for each row execute function app.incident_restricted_from_type();
 
 -- Anyone can request an approval as themselves; only approvers decide.
@@ -126,7 +133,7 @@ create policy own_request_only on public.approvals as restrictive
 create policy approver_decides on public.approvals as restrictive
   for update to authenticated
   using (app.can(venue_id, 'compliance.sign_off'))
-  with check (app.can(venue_id, 'compliance.sign_off'));
+  with check (app.can(venue_id, 'compliance.sign_off') and (decided_by is null or decided_by = auth.uid()));
 
 create trigger decided_approval_locked
   before update on public.approvals
