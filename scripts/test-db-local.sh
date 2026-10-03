@@ -22,7 +22,8 @@ run_as "'$PG_BIN/pg_ctl' -D '$DATA/pg' -o \"-p $PORT -k $SOCK -c listen_addresse
 
 PSQL=(psql -X -q -o /dev/null -v ON_ERROR_STOP=1 -h "$SOCK" -p "$PORT" -U postgres -d postgres)
 "${PSQL[@]}" -f "$ROOT/tests/db/supabase-shim.sql"
-for f in "$ROOT"/supabase/migrations/*.sql; do
+# Seed too, as `supabase start` does, so fixtures must coexist with seeded venues.
+for f in "$ROOT"/supabase/migrations/*.sql "$ROOT/supabase/seed.sql"; do
   "${PSQL[@]}" -f "$f"
 done
 

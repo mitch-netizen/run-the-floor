@@ -95,7 +95,8 @@ begin
   insert into public.roles (venue_id, name, capabilities)
   select v.id, r.name, r.caps
   from public.venues v
-  cross join (values ('Admin', all_caps), ('Staff', array['checklist.run'])) as r(name, caps);
+  cross join (values ('Admin', all_caps), ('Staff', array['checklist.run'])) as r(name, caps)
+  where v.organisation_id in ('10000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002');
 
   insert into public.memberships (venue_id, user_id, role_id, status)
   select m.venue_id, m.user_id, r.id, m.status
