@@ -11,7 +11,7 @@ const VENUES = [VENUE.A1, VENUE.A2, VENUE.B];
 // Reads gated on a capability, so a group owner without a membership sees none.
 const MEMBER_ONLY_READ = new Set(["import_rows"]);
 
-/** Rows affected by an update; 0 when the API role has no UPDATE grant at all. */
+/** Rows affected by a write; 0 when the role isn't permitted to make it at all. */
 async function updateCount(db: Db, sql: string, params: unknown[]) {
   await db.query("savepoint upd");
   try {
@@ -198,8 +198,8 @@ describe("storage", () => {
       await db.query("insert into storage.objects (bucket_id, name) values ('evidence', $1)", [`${VENUE.A1}/x.jpg`]);
       await expectSqlError(db, "insert into storage.objects (bucket_id, name) values ('evidence', $1)", [`${VENUE.B}/x.jpg`]);
       await expectSqlError(db, "insert into storage.objects (bucket_id, name) values ('evidence', 'no-venue.jpg')");
-      const del = await db.query("delete from storage.objects where bucket_id = 'evidence'");
-      expect(del.rowCount).toBe(0);
+      // Nothing is removed: no delete policy here, and Supabase also blocks direct deletes.
+      expect(await updateCount(db, "delete from storage.objects where bucket_id = 'evidence'", [])).toBe(0);
     });
   });
 
